@@ -2,6 +2,10 @@
 #include <LiquidCrystal.h>
 #include <EEPROM.h>
 
+//#define ENABLE_PROFILING
+
+#define DBG(args...) ({ Serial.print(__LINE__); Serial.print(": "); Serial.println(args); delay(10); })
+
 enum { LCD_ROWS = 2, LCD_COLUMNS = 16 };
 static LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
@@ -68,9 +72,6 @@ static void load_config(void)
     print_config("Using", tmp);
 }
 
-unsigned long adc_reads[1024];
-int idx;
-
 void setup(void)
 {
     memset(lcd_clear_row, ' ', sizeof(lcd_clear_row) - 1);
@@ -114,11 +115,49 @@ static int check_sensor_for_event(int which)
     return diff;
 }
 
+#ifdef ENABLE_PROFILING
+unsigned long calc_average(unsigned long *values, int n)
+{
+    unsigned long ret;
+    unsigned long avg;
+    unsigned long was;
+    int i;
+
+    avg = 0;
+    DBG(n);
+    for (i = 0; i < n; i++)
+    {
+        was = avg;
+        avg += values[i];
+        if (avg < was)
+        {
+            DBG("WARNING: average() overflow");
+            break;
+        }
+    }
+    if (n == 0)
+    {
+        DBG("SIGFPE");
+        return 0;
+    }
+    DBG(avg);
+    ret = avg/n;
+    DBG(ret);
+    return ret;
+}
+#endif
+
 /*
  * Reading split times:
  * First, wait for sensor 1 to trigger.  After sensor 1, wait for sensor 2.
  * If sensor 2 is not detected within 5 seconds, reset and wait for sensor 1.
  */
+
+#ifdef ENABLE_PROFILING
+const int adc_num = 100;
+static unsigned long adc_reads[adc_num] = {};
+#endif
+
 void loop(void)
 {
     unsigned long timeout;
@@ -126,12 +165,16 @@ void loop(void)
     unsigned long now;
     int iter;
     int diff;
-    unsigned long a;
-    unsigned long b;
 
     timeout = 0;
     for (iter = 0; iter < 2; iter++)
     {
+#ifdef ENABLE_PROFILING
+        unsigned long avg;
+        int adc_idx = 0;
+        int adc_looped = 0;
+#endif
+
         lcd.setCursor(15, 1);
         if (iter == 0)
             lcd.print("A");
@@ -141,7 +184,11 @@ void loop(void)
         check_sensor_for_event(iter);
         do
         {
+#ifdef ENABLE_PROFILING
+            unsigned long a;
+            unsigned long b;
             a = micros();
+#endif
             diff = check_sensor_for_event(iter) ;
             times[iter] = millis();
             if (iter > 0)
@@ -153,13 +200,34 @@ void loop(void)
                     break;
                 }
             }
+#ifdef ENABLE_PROFILING
             b = micros();
+            adc_reads[adc_idx] = (b-a);
+            adc_idx += 1;
+            if (adc_idx == adc_num)
+            {
+                adc_looped = 1;
+                adc_idx = 0;
+            }
+#endif
         } while (diff < cfg.threshold);
         soft_clear();
+
         lcd.print(diff);
         lcd.print(" ");
         lcd.print(cfg.threshold);
-        delay(cfg.min_time);
+
+#ifdef ENABLE_PROFILING
+        if (adc_looped)
+            adc_idx = adc_num;
+        avg = calc_average(adc_reads, adc_idx);
+        lcd.print(avg, DEC);
+        Serial.print("AVERAGE: ");
+        Serial.println(avg);
+#endif
+        while (millis() - times[iter] < cfg.min_time)
+        {
+        }
     }
 
     soft_clear();
