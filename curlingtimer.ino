@@ -24,10 +24,10 @@ struct cfg {
     unsigned int max_time;
 };
 static struct cfg cfg = {
-    /* version     */ 0x100,
+    /* version     */ 0x101,
     /* threshold   */ 100,
     /* min_time    */ 500,
-    /* max_time    */ 5000,
+    /* max_time    */ 6000,
 };
 
 static void print_config(const char *desc, struct cfg *ptr)
