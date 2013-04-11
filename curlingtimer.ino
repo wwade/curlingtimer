@@ -68,6 +68,9 @@ static void load_config(void)
     print_config("Using", tmp);
 }
 
+unsigned long adc_reads[1024];
+int idx;
+
 void setup(void)
 {
     memset(lcd_clear_row, ' ', sizeof(lcd_clear_row) - 1);
@@ -111,51 +114,13 @@ static int check_sensor_for_event(int which)
     return diff;
 }
 
-#define DBG(args...) ({ Serial.print(__LINE__); Serial.print(": "); Serial.print(args); delay(100); })
-unsigned long calc_average(unsigned long *values, int n)
-{
-    unsigned long ret;
-    unsigned long avg;
-    unsigned long was;
-    int i;
-
-    DBG(n);
-    for (i = 0; i < n; i++)
-    {
-        was = avg;
-        avg += values[i];
-        if (avg < was)
-        {
-            DBG("WARNING: average() overflow");
-            break;
-        }
-    }
-    if (n == 0)
-    {
-        DBG("SIGFPE");
-        return 0;
-    }
-    DBG(avg);
-    ret = avg/n;
-    DBG(ret);
-    return ret;
-}
-
 /*
  * Reading split times:
  * First, wait for sensor 1 to trigger.  After sensor 1, wait for sensor 2.
  * If sensor 2 is not detected within 5 seconds, reset and wait for sensor 1.
  */
-const int adc_num = 1024;
-static unsigned long adc_reads[adc_num];
-
 void loop(void)
 {
-    unsigned long avg;
-    int adc_idx;
-    int adc_looped;
-
-    unsigned long cnt;
     unsigned long timeout;
     unsigned long times[2];
     unsigned long now;
@@ -164,9 +129,7 @@ void loop(void)
     unsigned long a;
     unsigned long b;
 
-    //DBG("A");
     timeout = 0;
-    cnt = millis();
     for (iter = 0; iter < 2; iter++)
     {
         lcd.setCursor(15, 1);
@@ -176,8 +139,6 @@ void loop(void)
             lcd.print("B");
 
         check_sensor_for_event(iter);
-        adc_idx = 0;
-        adc_looped = 0;
         do
         {
             a = micros();
@@ -185,7 +146,7 @@ void loop(void)
             times[iter] = millis();
             if (iter > 0)
             {
-                now = millis();
+                now = times[iter];
                 if (now - times[iter-1] > cfg.max_time)
                 {
                     timeout = 1;
@@ -193,24 +154,12 @@ void loop(void)
                 }
             }
             b = micros();
-            adc_reads[adc_idx] = (b-a);
-            adc_idx += 1;
-            if (adc_idx == adc_num)
-            {
-                adc_looped = 1;
-                adc_idx = 0;
-            }
         } while (diff < cfg.threshold);
         soft_clear();
         lcd.print(diff);
         lcd.print(" ");
-        //avg = calc_average(adc_reads, adc_looped ? adc_num : adc_idx);
-        //lcd.print(avg, DEC);
-        Serial.print("AVERAGE: ");
-        Serial.println(avg);
-        while (millis() - times[iter] < 2000)
-        {
-        }
+        lcd.print(cfg.threshold);
+        delay(cfg.min_time);
     }
 
     soft_clear();
