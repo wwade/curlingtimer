@@ -12,10 +12,10 @@ static void soft_clear(void)
 
 void setup(void)
 {
-    lcd.begin(16, 2);
-    lcd.setCursor(0,0);
     Serial.begin(9600);
     Serial.println("hello");
+    lcd.begin(16, 2);
+    lcd.setCursor(0,0);
     lcd.print("Menu: Select");
     soft_clear();
 }
@@ -23,8 +23,21 @@ void setup(void)
 unsigned long last;
 unsigned long count;
 
+static void print_tag(const char *tag, unsigned long val)
+{
+    Serial.print(tag);
+    Serial.println(val);
+}
+
+static void print_tag(const char *tag, float val)
+{
+    Serial.print(tag);
+    Serial.println(val);
+}
+
 void loop(void)
 {
+    float xy;
     unsigned long a;
     unsigned long b;
     unsigned long c;
@@ -33,11 +46,13 @@ void loop(void)
     a = micros();
     value = analogRead(0);
     b = micros();
-    lcd.print(b-a);
+    xy = (float)value / 145.3;
     c = micros();
 
-    lcd.print(" ");
-    lcd.print(value);
+    print_tag("Analog Read (us): ", b-a);
+    print_tag("Floating point math (us): ", c-b);
+    print_tag("FP math result: ",  xy);
+
     Serial.println(a);
     Serial.println(b-a);
     Serial.println(c-b);
