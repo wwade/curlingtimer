@@ -1,63 +1,225 @@
 #include <Arduino.h>
 #include <LiquidCrystal.h>
+#include <EEPROM.h>
 
+enum { LCD_ROWS = 2, LCD_COLUMNS = 16 };
 static LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
+static  char lcd_clear_row[LCD_COLUMNS+1];
 static void soft_clear(void)
 {
     lcd.setCursor(0,1);
-    lcd.print("                ");
+    lcd.print(lcd_clear_row);
     lcd.setCursor(0,1);
+}
+
+struct cfg {
+    unsigned int ver_info;
+    unsigned int threshold;
+    unsigned int min_time;
+    unsigned int max_time;
+};
+static struct cfg cfg = {
+    /* version     */ 0x100,
+    /* threshold   */ 100,
+    /* min_time    */ 500,
+    /* max_time    */ 5000,
+};
+
+static void print_config(const char *desc, struct cfg *ptr)
+{
+    Serial.print(desc);
+    Serial.println(" config:");
+    Serial.print("Config version: ");
+    Serial.println(ptr->ver_info, HEX);
+    Serial.print("Threshold: ");
+    Serial.println(ptr->threshold);
+    Serial.print("Min Time: ");
+    Serial.println(ptr->min_time);
+    Serial.print("Max Time: ");
+    Serial.println(ptr->max_time);
+    Serial.println("");
+}
+
+static void load_config(void)
+{
+    struct cfg *tmp;
+    unsigned char cfg_tmp[sizeof *tmp];
+    int i;
+    for (i = 0; i < sizeof cfg_tmp; i++)
+    {
+        cfg_tmp[i] = EEPROM.read(i);
+    }
+    tmp = (struct cfg*)((void*)cfg_tmp);
+    print_config("Default", &cfg);
+    print_config("EEPROM", tmp);
+    if (tmp->ver_info == cfg.ver_info)
+    {
+        memcpy(&cfg, tmp, sizeof cfg);
+    }
+    else
+    {
+        memcpy(tmp, &cfg, sizeof cfg);
+        for (i = 0; i < sizeof cfg_tmp; i++)
+        {
+            EEPROM.write(i, cfg_tmp[i]);
+        }
+    }
+    print_config("Using", tmp);
 }
 
 void setup(void)
 {
+    memset(lcd_clear_row, ' ', sizeof(lcd_clear_row) - 1);
     Serial.begin(9600);
-    Serial.println("hello");
     lcd.begin(16, 2);
+
+    load_config();
+
     lcd.setCursor(0,0);
     lcd.print("Menu: Select");
+
     soft_clear();
+
 }
 
-unsigned long last;
-unsigned long count;
 
-static void print_tag(const char *tag, unsigned long val)
+static int sensor_value;
+static int check_sensor_for_event(int which)
 {
-    Serial.print(tag);
-    Serial.println(val);
+    int now;
+    int diff;
+
+    switch (which)
+    {
+        case 0:
+            now = analogRead(0);
+            break;
+        case 1:
+            now = analogRead(0);
+            break;
+        default:
+            now = 0;
+            break;
+    }
+
+    if (now > sensor_value)
+        diff = now - sensor_value;
+    else
+        diff = sensor_value - now;
+    sensor_value = now;
+    return diff;
 }
 
-static void print_tag(const char *tag, float val)
+#define DBG(args...) ({ Serial.print(__LINE__); Serial.print(": "); Serial.print(args); delay(100); })
+unsigned long calc_average(unsigned long *values, int n)
 {
-    Serial.print(tag);
-    Serial.println(val);
+    unsigned long ret;
+    unsigned long avg;
+    unsigned long was;
+    int i;
+
+    DBG(n);
+    for (i = 0; i < n; i++)
+    {
+        was = avg;
+        avg += values[i];
+        if (avg < was)
+        {
+            DBG("WARNING: average() overflow");
+            break;
+        }
+    }
+    if (n == 0)
+    {
+        DBG("SIGFPE");
+        return 0;
+    }
+    DBG(avg);
+    ret = avg/n;
+    DBG(ret);
+    return ret;
 }
+
+/*
+ * Reading split times:
+ * First, wait for sensor 1 to trigger.  After sensor 1, wait for sensor 2.
+ * If sensor 2 is not detected within 5 seconds, reset and wait for sensor 1.
+ */
+const int adc_num = 1024;
+static unsigned long adc_reads[adc_num];
 
 void loop(void)
 {
-    float xy;
+    unsigned long avg;
+    int adc_idx;
+    int adc_looped;
+
+    unsigned long cnt;
+    unsigned long timeout;
+    unsigned long times[2];
+    unsigned long now;
+    int iter;
+    int diff;
     unsigned long a;
     unsigned long b;
-    unsigned long c;
-    int value;
 
-    a = micros();
-    value = analogRead(0);
-    b = micros();
-    xy = (float)value / 145.3;
-    c = micros();
+    //DBG("A");
+    timeout = 0;
+    cnt = millis();
+    for (iter = 0; iter < 2; iter++)
+    {
+        lcd.setCursor(15, 1);
+        if (iter == 0)
+            lcd.print("A");
+        else
+            lcd.print("B");
 
-    print_tag("Analog Read (us): ", b-a);
-    print_tag("Floating point math (us): ", c-b);
-    print_tag("FP math result: ",  xy);
-
-    Serial.println(a);
-    Serial.println(b-a);
-    Serial.println(c-b);
-    while (millis() - last < 2000) {
+        check_sensor_for_event(iter);
+        adc_idx = 0;
+        adc_looped = 0;
+        do
+        {
+            a = micros();
+            diff = check_sensor_for_event(iter) ;
+            times[iter] = millis();
+            if (iter > 0)
+            {
+                now = millis();
+                if (now - times[iter-1] > cfg.max_time)
+                {
+                    timeout = 1;
+                    break;
+                }
+            }
+            b = micros();
+            adc_reads[adc_idx] = (b-a);
+            adc_idx += 1;
+            if (adc_idx == adc_num)
+            {
+                adc_looped = 1;
+                adc_idx = 0;
+            }
+        } while (diff < cfg.threshold);
+        soft_clear();
+        lcd.print(diff);
+        lcd.print(" ");
+        //avg = calc_average(adc_reads, adc_looped ? adc_num : adc_idx);
+        //lcd.print(avg, DEC);
+        Serial.print("AVERAGE: ");
+        Serial.println(avg);
+        while (millis() - times[iter] < 2000)
+        {
+        }
     }
-    last = millis();
+
     soft_clear();
+    if (timeout)
+    {
+        lcd.print("(TIMEOUT)");
+    }
+    else
+    {
+        lcd.print((float)(times[1] - times[0])/1000.0, 2);
+    }
 }
