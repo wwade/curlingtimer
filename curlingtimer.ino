@@ -3,6 +3,21 @@
 #include <EEPROM.h>
 
 //#define ENABLE_PROFILING
+enum {
+    lcd_button_NONE,
+    lcd_button_RIGHT = 50,
+    lcd_button_UP = 195,
+    lcd_button_DOWN = 380,
+    lcd_button_LEFT = 555,
+    lcd_button_SELECT = 790,
+};
+
+enum {
+    prog_state_main,
+    prog_state_menu,
+    prog_state_NUM,
+};
+
 
 #define DBG(args...) ({ Serial.print(__LINE__); Serial.print(": "); Serial.println(args); delay(10); })
 
@@ -72,6 +87,37 @@ static void load_config(void)
     print_config("Using", tmp);
 }
 
+static int lcd_get_button_from_value(int adc_key_in)
+{
+    if (adc_key_in < lcd_button_RIGHT)
+        return lcd_button_RIGHT; 
+    else if (adc_key_in < lcd_button_UP)
+        return lcd_button_UP;
+    else if (adc_key_in < lcd_button_DOWN)
+        return lcd_button_DOWN;
+    else if (adc_key_in < lcd_button_LEFT)
+        return lcd_button_LEFT;
+    else if (adc_key_in < lcd_button_SELECT)
+        return lcd_button_SELECT;  
+    else
+        return lcd_button_NONE;
+}
+
+static int lcd_get_button(void)
+{
+    return lcd_get_button_from_value(analogRead(0));
+}
+
+
+void main_setup(void)
+{
+    DBG(__FUNCTION__);
+    lcd.setCursor(0,0);
+    lcd.print("Menu: Select");
+
+    soft_clear();
+}
+
 void setup(void)
 {
     memset(lcd_clear_row, ' ', sizeof(lcd_clear_row) - 1);
@@ -80,11 +126,7 @@ void setup(void)
 
     load_config();
 
-    lcd.setCursor(0,0);
-    lcd.print("Menu: Select");
-
-    soft_clear();
-
+    main_setup();
 }
 
 
@@ -106,6 +148,9 @@ static int check_sensor_for_event(int which)
             now = 0;
             break;
     }
+
+    if (now == lcd_button_SELECT)
+        return 0;
 
     if (now > sensor_value)
         diff = now - sensor_value;
@@ -158,15 +203,17 @@ const int adc_num = 100;
 static unsigned long adc_reads[adc_num] = {};
 #endif
 
-void loop(void)
+static int main_loop(void)
 {
     unsigned long timeout;
     unsigned long times[2];
     unsigned long now;
+    unsigned long last;
     int iter;
     int diff;
 
     timeout = 0;
+    last = millis();
     for (iter = 0; iter < 2; iter++)
     {
 #ifdef ENABLE_PROFILING
@@ -198,6 +245,17 @@ void loop(void)
                 {
                     timeout = 1;
                     break;
+                }
+            }
+            else
+            {
+                if (times[iter] - last > 100)
+                {
+                    if (lcd_get_button() == lcd_button_SELECT)
+                    {
+                        Serial.println("got SELECT button");
+                        return prog_state_menu;
+                    }
                 }
             }
 #ifdef ENABLE_PROFILING
@@ -238,5 +296,58 @@ void loop(void)
     else
     {
         lcd.print((float)(times[1] - times[0])/1000.0, 2);
+    }
+
+    return prog_state_NUM;
+}
+
+static void menu_enter(void)
+{
+    DBG(__FUNCTION__);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("MENU");
+    while (lcd_get_button() != lcd_button_NONE) { }
+}
+
+static void menu_leave(void)
+{
+    while (lcd_get_button() != lcd_button_NONE) { }
+}
+
+static int menu_loop(void)
+{
+    if (lcd_get_button() == lcd_button_SELECT)
+        return prog_state_main;
+
+    return prog_state_NUM;
+}
+
+
+struct func_trans {
+    int (*exec)(void);
+    void (*enter)(void);
+    void (*leave)(void);
+};
+typedef int (*cb_t)(void);
+void loop(void)
+{
+    static int state = prog_state_main;
+    int ret;
+
+    const struct func_trans cb[prog_state_NUM] = {
+        { main_loop, main_setup, NULL, },
+        { menu_loop, menu_enter, menu_leave, },
+
+    };
+
+    ret = cb[state].exec();
+    if (ret < prog_state_NUM && state != ret)
+    {
+        if (cb[state].leave != NULL)
+            cb[state].leave();
+        state = ret;
+        if (cb[state].enter != NULL)
+            cb[state].enter();
     }
 }
