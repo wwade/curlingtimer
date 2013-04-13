@@ -2,7 +2,7 @@
 #include <LiquidCrystal.h>
 #include <EEPROM.h>
 
-//#define ENABLE_PROFILING
+#define ENABLE_PROFILING
 enum {
     lcd_button_NONE,
     lcd_button_RIGHT = 50,
@@ -39,8 +39,8 @@ struct cfg {
     unsigned int max_time;
 };
 static struct cfg cfg = {
-    /* version     */ 0x101,
-    /* threshold   */ 100,
+    /* version     */ 0x100,
+    /* threshold   */ 150,
     /* min_time    */ 500,
     /* max_time    */ 6000,
 };
@@ -112,6 +112,7 @@ static int lcd_get_button(void)
 void main_setup(void)
 {
     DBG(__FUNCTION__);
+    lcd.clear();
     lcd.setCursor(0,0);
     lcd.print("Menu: Select");
 
@@ -131,33 +132,27 @@ void setup(void)
 
 
 static int sensor_value;
-static int check_sensor_for_event(int which)
+static int check_sensor_for_event(int which, int *val)
 {
-    int now;
+    int adc_val;
     int diff;
 
     switch (which)
     {
         case 0:
-            now = analogRead(0);
+            adc_val = analogRead(3);
             break;
         case 1:
-            now = analogRead(0);
+            adc_val = analogRead(3);
             break;
         default:
-            now = 0;
+            adc_val = 0;
             break;
     }
 
-    if (now == lcd_button_SELECT)
-        return 0;
+    *val = adc_val;
 
-    if (now > sensor_value)
-        diff = now - sensor_value;
-    else
-        diff = sensor_value - now;
-    sensor_value = now;
-    return diff;
+    return (adc_val > cfg.threshold);
 }
 
 #ifdef ENABLE_PROFILING
@@ -202,33 +197,39 @@ unsigned long calc_average(unsigned long *values, int n)
 const int adc_num = 100;
 static unsigned long adc_reads[adc_num] = {};
 #endif
+unsigned long last_time;
 
 static int main_loop(void)
 {
     unsigned long timeout;
     unsigned long times[2];
+    int last[2];
     unsigned long now;
-    unsigned long last;
     int iter;
-    int diff;
+    int event;
 
     timeout = 0;
-    last = millis();
+    last_time = millis();
     for (iter = 0; iter < 2; iter++)
     {
 #ifdef ENABLE_PROFILING
         unsigned long avg;
         int adc_idx = 0;
-        int adc_looped = 0;
 #endif
 
         lcd.setCursor(15, 1);
         if (iter == 0)
+        {
             lcd.print("A");
+            Serial.println("Read Sensor 1");
+        }
         else
+        {
             lcd.print("B");
+            Serial.println("Read Sensor 2");
+        }
 
-        check_sensor_for_event(iter);
+        check_sensor_for_event(iter, &last[iter]);
         do
         {
 #ifdef ENABLE_PROFILING
@@ -236,7 +237,7 @@ static int main_loop(void)
             unsigned long b;
             a = micros();
 #endif
-            diff = check_sensor_for_event(iter) ;
+            event = check_sensor_for_event(iter, &last[iter]) ;
             times[iter] = millis();
             if (iter > 0)
             {
@@ -249,11 +250,11 @@ static int main_loop(void)
             }
             else
             {
-                if (times[iter] - last > 100)
+                if (times[iter] - last_time > 100)
                 {
+                    last_time = times[iter];
                     if (lcd_get_button() == lcd_button_SELECT)
                     {
-                        Serial.println("got SELECT button");
                         return prog_state_menu;
                     }
                 }
@@ -264,27 +265,27 @@ static int main_loop(void)
             adc_idx += 1;
             if (adc_idx == adc_num)
             {
-                adc_looped = 1;
+                avg = calc_average(adc_reads, adc_idx);
+                Serial.print("AVERAGE: ");
+                Serial.println(avg);
                 adc_idx = 0;
             }
 #endif
-        } while (diff < cfg.threshold);
+        } while (event == 0);
         soft_clear();
 
-        lcd.print(diff);
+        lcd.print(last[0]);
+        lcd.print(" ");
+        lcd.print(last[1]);
         lcd.print(" ");
         lcd.print(cfg.threshold);
 
-#ifdef ENABLE_PROFILING
-        if (adc_looped)
-            adc_idx = adc_num;
-        avg = calc_average(adc_reads, adc_idx);
-        lcd.print(avg, DEC);
-        Serial.print("AVERAGE: ");
-        Serial.println(avg);
-#endif
         while (millis() - times[iter] < cfg.min_time)
         {
+            if (lcd_get_button() == lcd_button_SELECT)
+            {
+                return prog_state_menu;
+            }
         }
     }
 
@@ -300,6 +301,10 @@ static int main_loop(void)
 
     return prog_state_NUM;
 }
+
+/*
+ *
+ */
 
 static void menu_enter(void)
 {
@@ -317,12 +322,31 @@ static void menu_leave(void)
 
 static int menu_loop(void)
 {
+    unsigned long now;
+
     if (lcd_get_button() == lcd_button_SELECT)
         return prog_state_main;
+
+    now = millis();
+    if (now - last_time > 500)
+    {
+        last_time = now;
+        lcd.clear();
+        lcd.setCursor(0,0);
+        lcd.print("Sensor 1: ");
+        lcd.print(analogRead(3));
+        lcd.setCursor(0,1);
+        lcd.print("Sensor 2: ");
+        lcd.print(analogRead(4));
+    }
+
 
     return prog_state_NUM;
 }
 
+/*
+ *
+ */
 
 struct func_trans {
     int (*exec)(void);
