@@ -6,6 +6,7 @@
 
 #define ENABLE_PROFILING
 // #define EE_DEBUG
+// #define DEBUG_MEASUREMENT
 
 
 enum {
@@ -305,10 +306,6 @@ void setup(void)
  * First, wait for sensor 1 to trigger.  After sensor 1, wait for sensor 2.
  * If sensor 2 is not detected within 5 seconds, reset and wait for sensor 1.
  */
-
-unsigned long last_time;
-
-
 /*
  * event states:
  * 0 - no rock
@@ -344,8 +341,12 @@ static unsigned long min_loop = (unsigned long)(-1);
 
 static int next_event(int cur_state, unsigned long fail_time, unsigned long *etime, int *val)
 {
+    const int hist_num = 8;
+    int idx;
+    int hist_base;
     int adc_val;
-    int save_val;
+    int cmp_val;
+    int history[hist_num];
     int delta;
     int dir;
     unsigned long event_time;
@@ -358,7 +359,13 @@ static int next_event(int cur_state, unsigned long fail_time, unsigned long *eti
     int adc_idx = 0;
 #endif
 
-    save_val = read_sensor_for_state(cur_state, &dir);
+    history[0] = read_sensor_for_state(cur_state, &dir);
+    for (idx = 0; idx < hist_num; idx++)
+    {
+        history[idx] = history[0];
+    }
+    hist_base = 1;
+    idx = 0;
     a = 0;
     do
     {
@@ -391,28 +398,60 @@ static int next_event(int cur_state, unsigned long fail_time, unsigned long *eti
             a = b;
         }
 #endif
-        adc_val = read_sensor_for_state(cur_state, &dir);
+        adc_val = history[idx] = read_sensor_for_state(cur_state, &dir);
+        cmp_val = history[hist_base];
         event_time = millis();
         if (dir == 1)
         {
-            if (adc_val > save_val)
-                delta = adc_val - save_val;
+            if (adc_val > cmp_val)
+                delta = adc_val - cmp_val;
             else
                 delta = 0;
         }
         else
         {
-            if (adc_val < save_val)
-                delta = save_val - adc_val;
+            if (adc_val < cmp_val)
+                delta = cmp_val - adc_val;
             else
                 delta = 0;
         }
+
+#ifdef DEBUG_MEASUREMENT
+        if (delta > 5)
+        {
+            int i;
+            char xy[24];
+            DBG_D("cur_state", cur_state);
+            DBG_D("hist_base", hist_base);
+            DBG_D("idx", idx);
+            DBG_D("delta", delta);
+            for (i = hist_base; ; i++)
+            {
+                if (i >= hist_num)
+                    i = 0;
+                snprintf(xy, sizeof xy, "[%02d] = %-3d", i, history[i]);
+                Serial.println(xy);
+                if (i == idx)
+                    break;
+            }
+        }
+#endif
+
         if (delta > cfg.threshold)
         {
             *etime = event_time;
             *val = adc_val;
             return EVT_NOW;
         }
+
+        idx += 1;
+        if (idx == hist_num)
+            idx = 0;
+
+        hist_base += 1;
+        if (hist_base == hist_num)
+            hist_base = 0;
+
     } while(millis() < fail_time);
 
     return EVT_TIMEOUT;
@@ -641,6 +680,8 @@ static int change_run_mode(void)
 
 static int menu_loop(void)
 {
+
+    static unsigned long last_time;
     unsigned long now;
     int bytes;
     char sb;
