@@ -140,7 +140,7 @@ static int check_sensor_for_event(int which, int *val)
     switch (which)
     {
         case 0:
-            adc_val = analogRead(3);
+            adc_val = analogRead(4);
             break;
         case 1:
             adc_val = analogRead(3);
@@ -155,48 +155,12 @@ static int check_sensor_for_event(int which, int *val)
     return (adc_val > cfg.threshold);
 }
 
-#ifdef ENABLE_PROFILING
-unsigned long calc_average(unsigned long *values, int n)
-{
-    unsigned long ret;
-    unsigned long avg;
-    unsigned long was;
-    int i;
-
-    avg = 0;
-    DBG(n);
-    for (i = 0; i < n; i++)
-    {
-        was = avg;
-        avg += values[i];
-        if (avg < was)
-        {
-            DBG("WARNING: average() overflow");
-            break;
-        }
-    }
-    if (n == 0)
-    {
-        DBG("SIGFPE");
-        return 0;
-    }
-    DBG(avg);
-    ret = avg/n;
-    DBG(ret);
-    return ret;
-}
-#endif
-
 /*
  * Reading split times:
  * First, wait for sensor 1 to trigger.  After sensor 1, wait for sensor 2.
  * If sensor 2 is not detected within 5 seconds, reset and wait for sensor 1.
  */
 
-#ifdef ENABLE_PROFILING
-const int adc_num = 100;
-static unsigned long adc_reads[adc_num] = {};
-#endif
 unsigned long last_time;
 
 static int main_loop(void)
@@ -213,7 +177,8 @@ static int main_loop(void)
     for (iter = 0; iter < 2; iter++)
     {
 #ifdef ENABLE_PROFILING
-        unsigned long avg;
+        float avg = 0.0;
+        const int avg_num = 5000;
         int adc_idx = 0;
 #endif
 
@@ -261,14 +226,14 @@ static int main_loop(void)
             }
 #ifdef ENABLE_PROFILING
             b = micros();
-            adc_reads[adc_idx] = (b-a);
+            avg += (float)(b-a) / avg_num;
             adc_idx += 1;
-            if (adc_idx == adc_num)
+            if (adc_idx == avg_num)
             {
-                avg = calc_average(adc_reads, adc_idx);
-                Serial.print("AVERAGE: ");
-                Serial.println(avg);
+                Serial.print("Average loop time (microseconds): ");
+                Serial.println(avg, 3);
                 adc_idx = 0;
+                avg = 0;
             }
 #endif
         } while (event == 0);
