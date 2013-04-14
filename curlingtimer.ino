@@ -23,9 +23,14 @@ enum {
     prog_state_NUM,
 };
 
+enum {
+    sensor_NEAR = 4,
+    sensor_HOG = 3,
+};
 
-#define DBG(args...) ({ Serial.print(__LINE__); Serial.print(": "); Serial.println(args); delay(10); })
-#define DBG_D(x, args...) ({ Serial.print(__LINE__); Serial.print(" "); Serial.print(x); Serial.print(": "); Serial.println(args); delay(10); })
+
+#define DBG(args...) ({ Serial.print(__LINE__); Serial.print(": "); Serial.println(args); })
+#define DBG_D(x, args...) ({ Serial.print(__LINE__); Serial.print(" "); Serial.print(x); Serial.print(": "); Serial.println(args); })
 enum { LCD_ROWS = 2, LCD_COLUMNS = 16 };
 static LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
@@ -295,31 +300,6 @@ void setup(void)
     main_setup();
 }
 
-
-static int sensor_value;
-static int check_sensor_for_event(int which, int *val)
-{
-    int adc_val;
-    int diff;
-
-    switch (which)
-    {
-        case 0:
-            adc_val = analogRead(4);
-            break;
-        case 1:
-            adc_val = analogRead(3);
-            break;
-        default:
-            adc_val = 0;
-            break;
-    }
-
-    *val = adc_val;
-
-    return (adc_val > cfg.threshold);
-}
-
 /*
  * Reading split times:
  * First, wait for sensor 1 to trigger.  After sensor 1, wait for sensor 2.
@@ -336,25 +316,22 @@ unsigned long last_time;
  * 2 - rock before hog
  * 3 - rock at hog
  */
+
+enum { LIGHT_TO_DARK = 1, DARK_TO_LIGHT = 0, };
 static int read_sensor_for_state(int cur_state, int *dir)
 {
-    *dir = 0;
-    switch (cur_state)
-    {
-        case 0:
-            *dir = 1;
-            /* fall through */
-        case 1:
-            return analogRead(4);
-
-        case 2: 
-            *dir = 1;
-        case 3:
-            return analogRead(3);
-        default:
-            break;
-    }
-    EXCEPT(cur_state, 0);
+    const int cur_sensor[4] = {
+        sensor_NEAR, sensor_NEAR,
+        sensor_HOG, sensor_HOG,
+    };
+    const int state_dir[4] = {
+        LIGHT_TO_DARK, DARK_TO_LIGHT,
+        LIGHT_TO_DARK, DARK_TO_LIGHT,
+    };
+    if (cur_state < 0 || cur_state >= 4)
+        EXCEPT(cur_state, 0);
+    *dir = state_dir[cur_state];
+    return analogRead(cur_sensor[cur_state]);
 }
 
 enum {
@@ -362,22 +339,61 @@ enum {
     EVT_NOW = 1,
 };
 
-static int next_event(int cur_state, unsigned long fail_time, unsigned long *etime)
+static unsigned long max_loop;
+static unsigned long min_loop = (unsigned long)(-1);
+
+static int next_event(int cur_state, unsigned long fail_time, unsigned long *etime, int *val)
 {
     int adc_val;
     int save_val;
     int delta;
-    int count;
     int dir;
-    unsigned long etm;
+    unsigned long event_time;
+#ifdef ENABLE_PROFILING
+    unsigned long a;
+    unsigned long b;
+    unsigned long diff;
+    float avg = 0;
+    const int avg_num = 3000;
+    int adc_idx = 0;
+#endif
 
     save_val = read_sensor_for_state(cur_state, &dir);
-    count = 0;
+    a = 0;
     do
     {
+#ifdef ENABLE_PROFILING
+        b = micros();
+        if (a != 0)
+        {
+            diff = (b-a);
+            if (diff < min_loop)
+                min_loop = diff;
+            if (diff > max_loop)
+                max_loop = diff;
+            avg += (float)(diff) / avg_num;
+            adc_idx += 1;
+            if (adc_idx == avg_num)
+            {
+                Serial.print("Average/min/max loop time (microseconds): ");
+                Serial.print(avg, 3);
+                Serial.print(" / ");
+                Serial.print(min_loop);
+                Serial.print(" / ");
+                Serial.println(max_loop);
+                adc_idx = 0;
+                avg = 0;
+            }
+            a = b = micros();
+        }
+        else
+        {
+            a = b;
+        }
+#endif
         adc_val = read_sensor_for_state(cur_state, &dir);
-        etm = micros();
-        if (dir)
+        event_time = millis();
+        if (dir == 1)
         {
             if (adc_val > save_val)
                 delta = adc_val - save_val;
@@ -392,112 +408,106 @@ static int next_event(int cur_state, unsigned long fail_time, unsigned long *eti
                 delta = 0;
         }
         if (delta > cfg.threshold)
+        {
+            *etime = event_time;
+            *val = adc_val;
             return EVT_NOW;
-
+        }
     } while(millis() < fail_time);
 
     return EVT_TIMEOUT;
 }
 
+/*
+ *
+ */
+
+static int main_loop_timeout(void)
+{
+    if (lcd_get_button() == lcd_button_SELECT)
+        return prog_state_menu;
+    else
+        return prog_state_main;
+}
+
 static int main_loop(void)
 {
-    unsigned long timeout;
-    unsigned long times[2];
-    int last[2];
-    unsigned long now;
+    int evt;
     int iter;
-    int event;
+    unsigned long events[4];
+    int vals[4];
+    float speed;
+    const unsigned long timeout[4] = {
+        500,
+        5000,
+        5000,
+        5000,
+    };
+    const char msg[4] = {
+        '1', '2', '3', '4',
+    };
 
-    timeout = 0;
-    last_time = millis();
-    for (iter = 0; iter < 2; iter++)
+    for (iter = 0; iter < 4; iter++)
     {
-#ifdef ENABLE_PROFILING
-        float avg = 0.0;
-        const int avg_num = 5000;
-        int adc_idx = 0;
-#endif
-
         lcd.setCursor(15, 1);
-        if (iter == 0)
+        lcd.print(msg[iter]);
+        evt = next_event(iter, millis() + timeout[iter], events + iter, vals + iter);
+        if (evt == EVT_TIMEOUT)
         {
-            lcd.print("A");
+            if (iter > 0)
+            {
+                soft_clear();
+                lcd.print("(TIMEOUT)");
+            }
+            return main_loop_timeout();
+        }
+    }
+
+    Serial.println(e_div);
+
+    soft_clear();
+    for (iter = 0; iter < 4; iter++)
+    {
+        Serial.print("IDX ");
+        Serial.print(iter);
+        Serial.print(": ");
+        Serial.print(vals[iter]);
+        if (iter > 0)
+        {
+            Serial.print(", ");
+            Serial.print(events[iter]-events[iter-1]);
+            Serial.print(", ");
+            Serial.println(events[iter]-events[0]);
         }
         else
         {
-            lcd.print("B");
+            Serial.println("");
         }
+    }
 
-        check_sensor_for_event(iter, &last[iter]);
-        do
+    while (millis() - events[4] < cfg.min_time)
+    {
+        if (lcd_get_button() == lcd_button_SELECT)
         {
-#ifdef ENABLE_PROFILING
-            unsigned long a;
-            unsigned long b;
-            a = micros();
-#endif
-            event = check_sensor_for_event(iter, &last[iter]) ;
-            times[iter] = millis();
-            if (iter > 0)
-            {
-                now = times[iter];
-                if (now - times[iter-1] > cfg.max_time)
-                {
-                    timeout = 1;
-                    break;
-                }
-            }
-            else
-            {
-                if (times[iter] - last_time > 100)
-                {
-                    last_time = times[iter];
-                    if (lcd_get_button() == lcd_button_SELECT)
-                    {
-                        return prog_state_menu;
-                    }
-                }
-            }
-#ifdef ENABLE_PROFILING
-            b = micros();
-            avg += (float)(b-a) / avg_num;
-            adc_idx += 1;
-            if (adc_idx == avg_num)
-            {
-                Serial.print("Average loop time (microseconds): ");
-                Serial.println(avg, 3);
-                adc_idx = 0;
-                avg = 0;
-            }
-#endif
-        } while (event == 0);
-        soft_clear();
-
-        lcd.print(last[0]);
-        lcd.print(" ");
-        lcd.print(last[1]);
-        lcd.print(" ");
-        lcd.print(cfg.threshold);
-
-        while (millis() - times[iter] < cfg.min_time)
-        {
-            if (lcd_get_button() == lcd_button_SELECT)
-            {
-                return prog_state_menu;
-            }
+            return prog_state_menu;
         }
     }
 
     soft_clear();
-    if (timeout)
-    {
-        lcd.print("(TIMEOUT)");
-    }
-    else
-    {
-        lcd.print((float)(times[1] - times[0])/1000.0, 2);
-    }
+    lcd.print((float)(events[2] - events[0])/1000.0, 2);
+    lcd.print(" ");
 
+    speed = 3048.0 / (float)(events[3]-events[2]);
+    lcd.print(speed, 2);
+    lcd.print("m/s");
+
+    if (cfg.run_mode == 0)
+    {
+        while (millis() - events[3] < 2500)
+        {
+        }
+        return prog_state_menu;
+    }
     return prog_state_NUM;
 }
 
@@ -645,11 +655,11 @@ static int menu_loop(void)
         last_time = now;
         lcd.clear();
         lcd.setCursor(0,0);
-        lcd.print("Sensor 1: ");
-        lcd.print(analogRead(3));
+        lcd.print("Near: ");
+        lcd.print(analogRead(sensor_NEAR));
         lcd.setCursor(0,1);
-        lcd.print("Sensor 2: ");
-        lcd.print(analogRead(4));
+        lcd.print("Hog:  ");
+        lcd.print(analogRead(sensor_HOG));
     }
 
     bytes = Serial.available();
