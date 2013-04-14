@@ -5,6 +5,9 @@
 #include <stddef.h>
 
 #define ENABLE_PROFILING
+// #define EE_DEBUG
+
+
 enum {
     lcd_button_NONE,
     lcd_button_RIGHT = 50,
@@ -24,7 +27,7 @@ enum {
 
 
 #define DBG(args...) ({ Serial.print(__LINE__); Serial.print(": "); Serial.println(args); delay(10); })
-
+#define DBG_D(x, args...) ({ Serial.print(__LINE__); Serial.print(" "); Serial.print(x); Serial.print(": "); Serial.println(args); delay(10); })
 enum { LCD_ROWS = 2, LCD_COLUMNS = 16 };
 static LiquidCrystal lcd(8, 9, 4, 5, 6, 7);
 
@@ -49,25 +52,54 @@ enum {
 };
 
 struct exception {
-    char marker;
     unsigned long ex_millis;
     int ex_line;
-    int ex_a;
-    int ex_b;
+    unsigned long ex_a;
+    unsigned long ex_b;
+    unsigned char marker;
 };
 
 struct ee_data {
     struct cfg cfg;
 
-    char exception_marker;
+    unsigned char exception_marker;
+    char exceptions[0];
 };
 
+enum {
+    ee_addr_max = 1024,
+};
 static struct cfg cfg = {
     /* version     */ 0x100,
     /* threshold   */ 150,
     /* min_time    */ 500,
     /* max_time    */ 6000,
 };
+
+static void EEWRITE(size_t addr, unsigned char val)
+{
+#ifdef EE_DEBUG
+    Serial.print("EE WRITE ");
+    Serial.print(addr);
+    Serial.print(" = ");
+    Serial.println(val, HEX);
+#endif
+    EEPROM.write(addr, val);
+}
+
+static unsigned char EEREAD(size_t addr)
+{
+#ifndef EE_DEBUG
+    return EEPROM.read(addr);
+#else
+    unsigned char ret = EEPROM.read(addr);
+    Serial.print("EE READ ");
+    Serial.print(addr);
+    Serial.print(" => ");
+    Serial.println(ret, HEX);
+    return ret;
+#endif
+}
 
 static void print_config(const char *desc, struct cfg *ptr)
 {
@@ -91,7 +123,7 @@ static void load_config(void)
     int i;
     for (i = 0; i < sizeof cfg_tmp; i++)
     {
-        cfg_tmp[i] = EEPROM.read(i);
+        cfg_tmp[i] = EEREAD(i);
     }
     tmp = (struct cfg*)((void*)cfg_tmp);
     print_config("Default", &cfg);
@@ -105,7 +137,7 @@ static void load_config(void)
         memcpy(tmp, &cfg, sizeof cfg);
         for (i = 0; i < sizeof cfg_tmp; i++)
         {
-            EEPROM.write(i, cfg_tmp[i]);
+            EEWRITE(i, cfg_tmp[i]);
         }
     }
     print_config("Using", tmp);
@@ -113,39 +145,100 @@ static void load_config(void)
 
 
 const char *e_div = "==============================================";
+static size_t ex_ptr;
 
 static void exceptions_print(void)
 {
     struct exception exc;
-    unsigned char more;
-    size_t addr;
     unsigned int iter;
-    addr = offsetof(struct ee_data, exception_marker);
+    size_t addr;
 
-    more = EEPROM.read(addr);
-    if (more != exception_marker_more)
+    ex_ptr = offsetof(struct ee_data, exception_marker);
+
+    exc.marker = EEREAD(ex_ptr);
+    if (exc.marker != exception_marker_more)
     {
         Serial.println("(no exceptions)");
         return;
     }
 
+    Serial.println(e_div);
     Serial.println("Exceptions:");
-    while (more == exception_marker_more)
+    addr = offsetof(struct ee_data, exceptions);
+    while (exc.marker == exception_marker_more && addr < ee_addr_max)
     {
+        Serial.println(e_div);
         for (iter = 0; iter < sizeof exc; iter++)
         {
+            ((char*)(&exc))[iter] = EEREAD(addr+iter);
         }
+        ex_ptr = addr + offsetof(struct exception, marker);
+        addr = addr + iter;
+        Serial.print("    millis: "); Serial.println(exc.ex_millis);
+        Serial.print("    line:   "); Serial.println(exc.ex_line);
+        Serial.print("    A:      "); Serial.println(exc.ex_a);
+        Serial.print("    B:      "); Serial.println(exc.ex_b);
     }
+    Serial.println(e_div);
 }
 
 static int exceptions_clear(void)
 {
-    size_t addr = offsetof(struct ee_data, exception_marker);
-    if (EEPROM.read(addr) == exception_marker_stop)
+    ex_ptr = offsetof(struct ee_data, exception_marker);
+    if (EEREAD(ex_ptr) == exception_marker_stop)
         return 0;
-    EEPROM.write(addr, exception_marker_stop);
+    EEWRITE(ex_ptr, exception_marker_stop);
     return 1;
 }
+
+#define EXCEPT(args...) exception(__FUNCTION__, __LINE__, args)
+static void exception(const char *func, int line, int a, int b)
+{
+    int now;
+    int i;
+    struct exception e_new = {
+        millis(),
+        line,
+        a,
+        b,
+        exception_marker_stop,
+    };
+
+    now = millis();
+
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print(func);
+    lcd.setCursor(0,1);
+    lcd.print(line);
+    lcd.print(" ");
+    lcd.print(a);
+    lcd.print(" ");
+    lcd.print(b);
+
+    if (EEREAD(ex_ptr) != exception_marker_stop)
+    {
+        DBG("CLEAR");
+        exceptions_clear();
+    }
+
+    /* Store exception in EEPROM */
+    for (i = 0; i < sizeof e_new; i++)
+    {
+        EEWRITE(i+1+ex_ptr, ((char*)&e_new)[i]);
+    }
+    EEWRITE(ex_ptr, exception_marker_more);
+
+    /* Sleep a while */
+    while (millis() - now < 10000)
+    {
+    }
+    cli();
+    wdt_enable(WDTO_15MS);
+    while(1);
+}
+
+
 
 static int lcd_get_button_from_value(int adc_key_in)
 {
@@ -225,32 +318,6 @@ static int check_sensor_for_event(int which, int *val)
 unsigned long last_time;
 
 
-static void exception(const char *func, int line, int a, int b)
-{
-    int now;
-
-    now = millis();
-
-    lcd.clear();
-    lcd.setCursor(0,0);
-    lcd.print(func);
-    lcd.setCursor(0,1);
-    lcd.print(line);
-    lcd.print(" ");
-    lcd.print(a);
-    lcd.print(" ");
-    lcd.print(b);
-
-    /* Store exception in EEPROM */
-    while (millis() - now < 10000)
-    {
-    }
-    cli();
-    wdt_enable(WDTO_15MS);
-    while(1);
-}
-
-
 /*
  * event states:
  * 0 - no rock
@@ -276,7 +343,7 @@ static int read_sensor_for_state(int cur_state, int *dir)
         default:
             break;
     }
-    exception(__FUNCTION__, __LINE__, cur_state, 0);
+    EXCEPT(cur_state, 0);
 }
 
 enum {
@@ -431,6 +498,7 @@ static int main_loop(void)
  * menu:
  *   sh - show exceptions
  *   clr - clear exceptions
+ *   ex - exception test
  */
 enum sb {
     state_start,
@@ -442,6 +510,14 @@ enum sb {
     state_c,
     state_cl,
     state_clr,
+
+    state_e,
+    state_ex,
+
+    state_d,
+    state_du,
+    state_dum,
+    state_dump,
 } menu_state;
 
 
@@ -451,6 +527,8 @@ static void serial_menu_out(void)
     Serial.println("Menu Mode:");
     Serial.println("  sh        show exceptions");
     Serial.println("  clr       clear exceptions");
+    Serial.println("  ex        test exception");
+    Serial.println("  dump      dump EEPROM data");
     Serial.println("");
     Serial.print("> ");
 }
@@ -474,9 +552,7 @@ static void menu_leave(void)
 static int show_exceptions(void)
 {
     Serial.println("> Show exceptions");
-    Serial.println(e_div);
     exceptions_print();
-    Serial.println(e_div);
 }
 
 static int clear_exceptions(void)
@@ -486,6 +562,38 @@ static int clear_exceptions(void)
         Serial.println("-> Cleared");
     else
         Serial.println("-> No exceptions to clear");
+}
+
+static int test_exception(void)
+{
+    Serial.println("> Test exception");
+    EXCEPT(ex_ptr, millis());
+}
+
+static int dump_ee_data(void)
+{
+    int idx;
+    char ad[9];
+    unsigned char d;
+    Serial.println("> Dump EEPROM data");
+
+    for (idx = 0; idx < ee_addr_max; idx++)
+    {
+        if (idx % 16 == 0)
+        {
+            snprintf(ad, sizeof ad, "%07x:", idx);
+            Serial.println("");
+            Serial.print(ad);
+        }
+        if (idx % 2 == 0)
+        {
+            Serial.print(" ");
+        }
+        d = EEPROM.read(idx);
+        snprintf(ad, sizeof ad, "%02hhx", d);
+        Serial.print(ad);
+    }
+    Serial.println("");
 }
 
 static int menu_loop(void)
@@ -526,11 +634,17 @@ static int menu_loop(void)
         switch (menu_state) {
             case state_start:
                 switch (sb) {
-                    case 'c':
+                    case 'c': case 'C':
                         menu_state = state_c;
                         break;
-                    case 's':
+                    case 's': case 'S':
                         menu_state = state_s;
+                        break;
+                    case 'e': case 'E':
+                        menu_state = state_e;
+                        break;
+                    case 'd': case 'D':
+                        menu_state = state_d;
                         break;
                     case '\r': case '\n': case ' ':
                         break;
@@ -552,8 +666,21 @@ static int menu_loop(void)
 
             case state_s:
                 switch (sb) {
-                    case 'h':
+                    case 'h': case 'H':
                         menu_state = state_sh;
+                        break;
+                    default:
+                        bytes += 1;
+                        extra = sb;
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
+            case state_e:
+                switch (sb) {
+                    case 'x': case 'X':
+                        menu_state = state_ex;
                         break;
                     default:
                         bytes += 1;
@@ -565,7 +692,7 @@ static int menu_loop(void)
 
             case state_c:
                 switch (sb) {
-                    case 'l':
+                    case 'l': case 'L':
                         menu_state = state_cl;
                         break;
                     default:
@@ -578,8 +705,45 @@ static int menu_loop(void)
 
             case state_cl:
                 switch (sb) {
-                    case 'r':
+                    case 'r': case 'R':
                         menu_state = state_clr;
+                        break;
+                    default:
+                        bytes += 1;
+                        extra = sb;
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
+            case state_d:
+                switch (sb) {
+                    case 'u': case 'U':
+                        menu_state = state_du;
+                        break;
+                    default:
+                        bytes += 1;
+                        extra = sb;
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+            case state_du:
+                switch (sb) {
+                    case 'm': case 'M':
+                        menu_state = state_dum;
+                        break;
+                    default:
+                        bytes += 1;
+                        extra = sb;
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+            case state_dum:
+                switch (sb) {
+                    case 'p': case 'P':
+                        menu_state = state_dump;
                         break;
                     default:
                         bytes += 1;
@@ -606,6 +770,32 @@ static int menu_loop(void)
                 switch (sb) {
                     case '\r': case '\n': case ' ':
                         clear_exceptions();
+                        serial_menu_out();
+                        menu_state = state_start;
+                        break;
+                    default:
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
+            case state_ex:
+                switch (sb) {
+                    case '\r': case '\n': case ' ':
+                        test_exception();
+                        serial_menu_out();
+                        menu_state = state_start;
+                        break;
+                    default:
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
+            case state_dump:
+                switch (sb) {
+                    case '\r': case '\n': case ' ':
+                        dump_ee_data();
                         serial_menu_out();
                         menu_state = state_start;
                         break;
