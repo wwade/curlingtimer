@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <LiquidCrystal.h>
 #include <EEPROM.h>
+#include <avr/wdt.h>
+#include <stddef.h>
 
 #define ENABLE_PROFILING
 enum {
@@ -16,6 +18,8 @@ enum {
     prog_state_main,
     prog_state_menu,
     prog_state_NUM,
+
+    prog_state_startup = prog_state_menu,
 };
 
 
@@ -38,6 +42,26 @@ struct cfg {
     unsigned int min_time;
     unsigned int max_time;
 };
+
+enum {
+    exception_marker_stop = 0x55,
+    exception_marker_more = 0xff,
+};
+
+struct exception {
+    char marker;
+    unsigned long ex_millis;
+    int ex_line;
+    int ex_a;
+    int ex_b;
+};
+
+struct ee_data {
+    struct cfg cfg;
+
+    char exception_marker;
+};
+
 static struct cfg cfg = {
     /* version     */ 0x100,
     /* threshold   */ 150,
@@ -87,6 +111,42 @@ static void load_config(void)
     print_config("Using", tmp);
 }
 
+
+const char *e_div = "==============================================";
+
+static void exceptions_print(void)
+{
+    struct exception exc;
+    unsigned char more;
+    size_t addr;
+    unsigned int iter;
+    addr = offsetof(struct ee_data, exception_marker);
+
+    more = EEPROM.read(addr);
+    if (more != exception_marker_more)
+    {
+        Serial.println("(no exceptions)");
+        return;
+    }
+
+    Serial.println("Exceptions:");
+    while (more == exception_marker_more)
+    {
+        for (iter = 0; iter < sizeof exc; iter++)
+        {
+        }
+    }
+}
+
+static int exceptions_clear(void)
+{
+    size_t addr = offsetof(struct ee_data, exception_marker);
+    if (EEPROM.read(addr) == exception_marker_stop)
+        return 0;
+    EEPROM.write(addr, exception_marker_stop);
+    return 1;
+}
+
 static int lcd_get_button_from_value(int adc_key_in)
 {
     if (adc_key_in < lcd_button_RIGHT)
@@ -126,6 +186,7 @@ void setup(void)
     lcd.begin(16, 2);
 
     load_config();
+    exceptions_print();
 
     main_setup();
 }
@@ -163,6 +224,103 @@ static int check_sensor_for_event(int which, int *val)
 
 unsigned long last_time;
 
+
+static void exception(const char *func, int line, int a, int b)
+{
+    int now;
+
+    now = millis();
+
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print(func);
+    lcd.setCursor(0,1);
+    lcd.print(line);
+    lcd.print(" ");
+    lcd.print(a);
+    lcd.print(" ");
+    lcd.print(b);
+
+    /* Store exception in EEPROM */
+    while (millis() - now < 10000)
+    {
+    }
+    cli();
+    wdt_enable(WDTO_15MS);
+    while(1);
+}
+
+
+/*
+ * event states:
+ * 0 - no rock
+ * 1 - rock at back line
+ * 2 - rock before hog
+ * 3 - rock at hog
+ */
+static int read_sensor_for_state(int cur_state, int *dir)
+{
+    *dir = 0;
+    switch (cur_state)
+    {
+        case 0:
+            *dir = 1;
+            /* fall through */
+        case 1:
+            return analogRead(4);
+
+        case 2: 
+            *dir = 1;
+        case 3:
+            return analogRead(3);
+        default:
+            break;
+    }
+    exception(__FUNCTION__, __LINE__, cur_state, 0);
+}
+
+enum {
+    EVT_TIMEOUT = 0,
+    EVT_NOW = 1,
+};
+
+static int next_event(int cur_state, unsigned long fail_time, unsigned long *etime)
+{
+    int adc_val;
+    int save_val;
+    int delta;
+    int count;
+    int dir;
+    unsigned long etm;
+
+    save_val = read_sensor_for_state(cur_state, &dir);
+    count = 0;
+    do
+    {
+        adc_val = read_sensor_for_state(cur_state, &dir);
+        etm = micros();
+        if (dir)
+        {
+            if (adc_val > save_val)
+                delta = adc_val - save_val;
+            else
+                delta = 0;
+        }
+        else
+        {
+            if (adc_val < save_val)
+                delta = save_val - adc_val;
+            else
+                delta = 0;
+        }
+        if (delta > cfg.threshold)
+            return EVT_NOW;
+
+    } while(millis() < fail_time);
+
+    return EVT_TIMEOUT;
+}
+
 static int main_loop(void)
 {
     unsigned long timeout;
@@ -186,12 +344,10 @@ static int main_loop(void)
         if (iter == 0)
         {
             lcd.print("A");
-            Serial.println("Read Sensor 1");
         }
         else
         {
             lcd.print("B");
-            Serial.println("Read Sensor 2");
         }
 
         check_sensor_for_event(iter, &last[iter]);
@@ -271,12 +427,42 @@ static int main_loop(void)
  *
  */
 
+/*
+ * menu:
+ *   sh - show exceptions
+ *   clr - clear exceptions
+ */
+enum sb {
+    state_start,
+    state_error,
+
+    state_s,
+    state_sh,
+
+    state_c,
+    state_cl,
+    state_clr,
+} menu_state;
+
+
+static void serial_menu_out(void)
+{
+    Serial.println("");
+    Serial.println("Menu Mode:");
+    Serial.println("  sh        show exceptions");
+    Serial.println("  clr       clear exceptions");
+    Serial.println("");
+    Serial.print("> ");
+}
+
 static void menu_enter(void)
 {
     DBG(__FUNCTION__);
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("MENU");
+    serial_menu_out();
+    menu_state = state_start;
     while (lcd_get_button() != lcd_button_NONE) { }
 }
 
@@ -285,9 +471,29 @@ static void menu_leave(void)
     while (lcd_get_button() != lcd_button_NONE) { }
 }
 
+static int show_exceptions(void)
+{
+    Serial.println("> Show exceptions");
+    Serial.println(e_div);
+    exceptions_print();
+    Serial.println(e_div);
+}
+
+static int clear_exceptions(void)
+{
+    Serial.println("> Clear exceptions");
+    if (exceptions_clear())
+        Serial.println("-> Cleared");
+    else
+        Serial.println("-> No exceptions to clear");
+}
+
 static int menu_loop(void)
 {
     unsigned long now;
+    int bytes;
+    char sb;
+    char extra;
 
     if (lcd_get_button() == lcd_button_SELECT)
         return prog_state_main;
@@ -305,6 +511,113 @@ static int menu_loop(void)
         lcd.print(analogRead(4));
     }
 
+    bytes = Serial.available();
+    extra = 0;
+
+    while (bytes-- > 0)
+    {
+        if (extra) {
+            sb = extra;
+            extra = 0;
+        } else {
+            sb = Serial.read();
+        }
+        Serial.print(sb);
+        switch (menu_state) {
+            case state_start:
+                switch (sb) {
+                    case 'c':
+                        menu_state = state_c;
+                        break;
+                    case 's':
+                        menu_state = state_s;
+                        break;
+                    case '\r': case '\n': case ' ':
+                        break;
+                    default:
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
+            case state_error:
+                switch (sb) {
+                    case '\r': case '\n': case ' ':
+                        Serial.println("\n>> Command error");
+                        serial_menu_out();
+                        menu_state = state_start;
+                        break;
+                }
+                break;
+
+            case state_s:
+                switch (sb) {
+                    case 'h':
+                        menu_state = state_sh;
+                        break;
+                    default:
+                        bytes += 1;
+                        extra = sb;
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
+            case state_c:
+                switch (sb) {
+                    case 'l':
+                        menu_state = state_cl;
+                        break;
+                    default:
+                        bytes += 1;
+                        extra = sb;
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
+            case state_cl:
+                switch (sb) {
+                    case 'r':
+                        menu_state = state_clr;
+                        break;
+                    default:
+                        bytes += 1;
+                        extra = sb;
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
+            case state_sh:
+                switch (sb) {
+                    case '\r': case '\n': case ' ':
+                        show_exceptions();
+                        serial_menu_out();
+                        menu_state = state_start;
+                        break;
+                    default:
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
+            case state_clr:
+                switch (sb) {
+                    case '\r': case '\n': case ' ':
+                        clear_exceptions();
+                        serial_menu_out();
+                        menu_state = state_start;
+                        break;
+                    default:
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
+        }
+
+    }
 
     return prog_state_NUM;
 }
@@ -321,7 +634,7 @@ struct func_trans {
 typedef int (*cb_t)(void);
 void loop(void)
 {
-    static int state = prog_state_main;
+    static int state = -1;
     int ret;
 
     const struct func_trans cb[prog_state_NUM] = {
@@ -330,6 +643,11 @@ void loop(void)
 
     };
 
+    if (state < 0)
+    {
+        state = prog_state_startup;
+        cb[state].enter();
+    }
     ret = cb[state].exec();
     if (ret < prog_state_NUM && state != ret)
     {
