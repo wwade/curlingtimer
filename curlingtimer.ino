@@ -21,8 +21,6 @@ enum {
     prog_state_main,
     prog_state_menu,
     prog_state_NUM,
-
-    prog_state_startup = prog_state_menu,
 };
 
 
@@ -44,6 +42,7 @@ struct cfg {
     unsigned int threshold;
     unsigned int min_time;
     unsigned int max_time;
+    unsigned char run_mode;
 };
 
 enum {
@@ -70,10 +69,11 @@ enum {
     ee_addr_max = 1024,
 };
 static struct cfg cfg = {
-    /* version     */ 0x100,
+    /* version     */ 0x201,
     /* threshold   */ 150,
     /* min_time    */ 500,
     /* max_time    */ 6000,
+    /* run_mode    */ 1,
 };
 
 static void EEWRITE(size_t addr, unsigned char val)
@@ -116,36 +116,49 @@ static void print_config(const char *desc, struct cfg *ptr)
     Serial.println("");
 }
 
+static void save_config(void)
+{
+    int i;
+    for (i = 0; i < sizeof cfg; i++)
+    {
+        EEWRITE(i, ((unsigned char*)&cfg)[i]);
+    }
+}
+
 static void load_config(void)
 {
-    struct cfg *tmp;
-    unsigned char cfg_tmp[sizeof *tmp];
     int i;
-    for (i = 0; i < sizeof cfg_tmp; i++)
+    struct cfg tmp;
+    for (i = 0; i < sizeof cfg; i++)
     {
-        cfg_tmp[i] = EEREAD(i);
+        ((unsigned char*)(&tmp))[i] = EEREAD(i);
     }
-    tmp = (struct cfg*)((void*)cfg_tmp);
     print_config("Default", &cfg);
-    print_config("EEPROM", tmp);
-    if (tmp->ver_info == cfg.ver_info)
+    print_config("EEPROM", &tmp);
+    if (tmp.ver_info == cfg.ver_info)
     {
-        memcpy(&cfg, tmp, sizeof cfg);
+        memcpy(&cfg, &tmp, sizeof cfg);
     }
     else
     {
-        memcpy(tmp, &cfg, sizeof cfg);
-        for (i = 0; i < sizeof cfg_tmp; i++)
-        {
-            EEWRITE(i, cfg_tmp[i]);
-        }
+        save_config();
+        EEWRITE(offsetof(struct ee_data, exception_marker),
+                exception_marker_stop);
     }
-    print_config("Using", tmp);
+    print_config("Using", &cfg);
 }
 
 
 const char *e_div = "==============================================";
 static size_t ex_ptr;
+
+static void exception_print(struct exception *exc)
+{
+    Serial.print("    millis: "); Serial.println(exc->ex_millis);
+    Serial.print("    line:   "); Serial.println(exc->ex_line);
+    Serial.print("    A:      "); Serial.println(exc->ex_a);
+    Serial.print("    B:      "); Serial.println(exc->ex_b);
+}
 
 static void exceptions_print(void)
 {
@@ -170,14 +183,11 @@ static void exceptions_print(void)
         Serial.println(e_div);
         for (iter = 0; iter < sizeof exc; iter++)
         {
-            ((char*)(&exc))[iter] = EEREAD(addr+iter);
+            ((unsigned char*)(&exc))[iter] = EEREAD(addr+iter);
         }
         ex_ptr = addr + offsetof(struct exception, marker);
         addr = addr + iter;
-        Serial.print("    millis: "); Serial.println(exc.ex_millis);
-        Serial.print("    line:   "); Serial.println(exc.ex_line);
-        Serial.print("    A:      "); Serial.println(exc.ex_a);
-        Serial.print("    B:      "); Serial.println(exc.ex_b);
+        exception_print(&exc);
     }
     Serial.println(e_div);
 }
@@ -222,10 +232,11 @@ static void exception(const char *func, int line, int a, int b)
         exceptions_clear();
     }
 
+    exception_print(&e_new);
     /* Store exception in EEPROM */
     for (i = 0; i < sizeof e_new; i++)
     {
-        EEWRITE(i+1+ex_ptr, ((char*)&e_new)[i]);
+        EEWRITE(i+1+ex_ptr, ((unsigned char*)&e_new)[i]);
     }
     EEWRITE(ex_ptr, exception_marker_more);
 
@@ -494,12 +505,6 @@ static int main_loop(void)
  *
  */
 
-/*
- * menu:
- *   sh - show exceptions
- *   clr - clear exceptions
- *   ex - exception test
- */
 enum sb {
     state_start,
     state_error,
@@ -518,6 +523,11 @@ enum sb {
     state_du,
     state_dum,
     state_dump,
+
+    state_m,
+    state_mo,
+    state_mod,
+    state_mode,
 } menu_state;
 
 
@@ -529,6 +539,12 @@ static void serial_menu_out(void)
     Serial.println("  clr       clear exceptions");
     Serial.println("  ex        test exception");
     Serial.println("  dump      dump EEPROM data");
+    Serial.print  ("  mode      change startup mode [");
+    if (cfg.run_mode)
+        Serial.print("run");
+    else
+        Serial.print("developer");
+    Serial.println("]");
     Serial.println("");
     Serial.print("> ");
 }
@@ -549,13 +565,13 @@ static void menu_leave(void)
     while (lcd_get_button() != lcd_button_NONE) { }
 }
 
-static int show_exceptions(void)
+static inline int show_exceptions(void)
 {
     Serial.println("> Show exceptions");
     exceptions_print();
 }
 
-static int clear_exceptions(void)
+static inline int clear_exceptions(void)
 {
     Serial.println("> Clear exceptions");
     if (exceptions_clear())
@@ -564,13 +580,13 @@ static int clear_exceptions(void)
         Serial.println("-> No exceptions to clear");
 }
 
-static int test_exception(void)
+static inline int test_exception(void)
 {
     Serial.println("> Test exception");
     EXCEPT(ex_ptr, millis());
 }
 
-static int dump_ee_data(void)
+static inline int dump_ee_data(void)
 {
     int idx;
     char ad[9];
@@ -594,6 +610,23 @@ static int dump_ee_data(void)
         Serial.print(ad);
     }
     Serial.println("");
+}
+
+static int change_run_mode(void)
+{
+    Serial.print("> Change startup mode to ");
+    if (cfg.run_mode)
+    {
+        cfg.run_mode = 0;
+        Serial.println("[developer]");
+        save_config();
+    }
+    else
+    {
+        cfg.run_mode = 1;
+        Serial.println("[run]");
+        save_config();
+    }
 }
 
 static int menu_loop(void)
@@ -645,6 +678,9 @@ static int menu_loop(void)
                         break;
                     case 'd': case 'D':
                         menu_state = state_d;
+                        break;
+                    case 'm': case 'M':
+                        menu_state = state_m;
                         break;
                     case '\r': case '\n': case ' ':
                         break;
@@ -753,6 +789,43 @@ static int menu_loop(void)
                 }
                 break;
 
+            case state_m:
+                switch (sb) {
+                    case 'o': case 'O':
+                        menu_state = state_mo;
+                        break;
+                    default:
+                        bytes += 1;
+                        extra = sb;
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+            case state_mo:
+                switch (sb) {
+                    case 'd': case 'D':
+                        menu_state = state_mod;
+                        break;
+                    default:
+                        bytes += 1;
+                        extra = sb;
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+            case state_mod:
+                switch (sb) {
+                    case 'e': case 'E':
+                        menu_state = state_mode;
+                        break;
+                    default:
+                        bytes += 1;
+                        extra = sb;
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
             case state_sh:
                 switch (sb) {
                     case '\r': case '\n': case ' ':
@@ -805,6 +878,19 @@ static int menu_loop(void)
                 }
                 break;
 
+            case state_mode:
+                switch (sb) {
+                    case '\r': case '\n': case ' ':
+                        change_run_mode();
+                        serial_menu_out();
+                        menu_state = state_start;
+                        break;
+                    default:
+                        menu_state = state_error;
+                        break;
+                }
+                break;
+
         }
 
     }
@@ -835,7 +921,10 @@ void loop(void)
 
     if (state < 0)
     {
-        state = prog_state_startup;
+        if (cfg.run_mode)
+            state = prog_state_main;
+        else
+            state = prog_state_menu;
         cb[state].enter();
     }
     ret = cb[state].exec();
