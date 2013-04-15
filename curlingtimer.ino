@@ -6,7 +6,7 @@
 
 #define ENABLE_PROFILING
 // #define EE_DEBUG
-// #define DEBUG_MEASUREMENT
+ #define DEBUG_MEASUREMENT
 
 
 enum {
@@ -341,12 +341,13 @@ static unsigned long min_loop = (unsigned long)(-1);
 
 static int next_event(int cur_state, unsigned long fail_time, unsigned long *etime, int *val)
 {
-    const int hist_num = 8;
+    const int hist_num = 32;
     int idx;
     int hist_base;
     int adc_val;
     int cmp_val;
     int history[hist_num];
+    unsigned long tm[hist_num];
     int delta;
     int dir;
     unsigned long event_time;
@@ -354,15 +355,17 @@ static int next_event(int cur_state, unsigned long fail_time, unsigned long *eti
     unsigned long a;
     unsigned long b;
     unsigned long diff;
-    float avg = 0;
-    const int avg_num = 3000;
+    unsigned long avg;
+    const int avg_num = 1000;
     int adc_idx = 0;
 #endif
 
     history[0] = read_sensor_for_state(cur_state, &dir);
+    tm[0] = micros();
     for (idx = 0; idx < hist_num; idx++)
     {
         history[idx] = history[0];
+        tm[idx] = tm[0];
     }
     hist_base = 1;
     idx = 0;
@@ -378,12 +381,12 @@ static int next_event(int cur_state, unsigned long fail_time, unsigned long *eti
                 min_loop = diff;
             if (diff > max_loop)
                 max_loop = diff;
-            avg += (float)(diff) / avg_num;
+            avg += diff;
             adc_idx += 1;
             if (adc_idx == avg_num)
             {
                 Serial.print("Average/min/max loop time (microseconds): ");
-                Serial.print(avg, 3);
+                Serial.print(avg/adc_idx, 3);
                 Serial.print(" / ");
                 Serial.print(min_loop);
                 Serial.print(" / ");
@@ -398,6 +401,7 @@ static int next_event(int cur_state, unsigned long fail_time, unsigned long *eti
             a = b;
         }
 #endif
+        tm[idx] = micros();
         adc_val = history[idx] = read_sensor_for_state(cur_state, &dir);
         cmp_val = history[hist_base];
         event_time = millis();
@@ -417,10 +421,10 @@ static int next_event(int cur_state, unsigned long fail_time, unsigned long *eti
         }
 
 #ifdef DEBUG_MEASUREMENT
-        if (delta > 5)
+        if (cfg.run_mode == 0 && delta > 20)
         {
             int i;
-            char xy[24];
+            char xy[50];
             DBG_D("cur_state", cur_state);
             DBG_D("hist_base", hist_base);
             DBG_D("idx", idx);
@@ -429,7 +433,7 @@ static int next_event(int cur_state, unsigned long fail_time, unsigned long *eti
             {
                 if (i >= hist_num)
                     i = 0;
-                snprintf(xy, sizeof xy, "[%02d] = %-3d", i, history[i]);
+                snprintf(xy, sizeof xy, "[%02d] [%06lu] = %-3d", i, tm[i]-tm[hist_base], history[i]);
                 Serial.println(xy);
                 if (i == idx)
                     break;
